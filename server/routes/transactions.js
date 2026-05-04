@@ -1,30 +1,23 @@
 const express = require('express');
-const pool = require('../db/pool');
+const supabase = require('../db/supabase');
 const router = express.Router();
 
 // GET all transactions with optional filters
 router.get('/', async (req, res) => {
   try {
-    const { month, year, week } = req.query;
-    let query = 'SELECT * FROM transactions WHERE 1=1';
-    const params = [];
-
-    if (year) {
-      params.push(year);
-      query += ` AND EXTRACT(YEAR FROM date) = $${params.length}`;
-    }
+    const { month, year } = req.query;
+    let q = supabase.from('transactions').select('*');
+    if (year)  q = q.filter('date', 'gte', `${year}-01-01`).filter('date', 'lte', `${year}-12-31`);
     if (month) {
-      params.push(month);
-      query += ` AND EXTRACT(MONTH FROM date) = $${params.length}`;
+      const y = year || new Date().getFullYear();
+      const m = String(month).padStart(2, '0');
+      const last = new Date(y, month, 0).getDate();
+      q = q.filter('date', 'gte', `${y}-${m}-01`).filter('date', 'lte', `${y}-${m}-${last}`);
     }
-    if (week) {
-      params.push(week);
-      query += ` AND EXTRACT(WEEK FROM date) = $${params.length}`;
-    }
-
-    query += ' ORDER BY date DESC, created_at DESC';
-    const result = await pool.query(query, params);
-    res.json(result.rows);
+    q = q.order('date', { ascending: false }).order('created_at', { ascending: false });
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -33,30 +26,20 @@ router.get('/', async (req, res) => {
 // GET summary (monthly)
 router.get('/summary', async (req, res) => {
   try {
-    const { month, year } = req.query;
-    const params = [year || new Date().getFullYear(), month || new Date().getMonth() + 1];
+    const year = req.query.year || new Date().getFullYear();
+    const month = req.query.month || new Date().getMonth() + 1;
+    const m = String(month).padStart(2, '0');
+    const last = new Date(year, month, 0).getDate();
 
-    const result = await pool.query(
-      `SELECT
-        type,
-        SUM(amount) as total,
-        COUNT(*) as count
-      FROM transactions
-      WHERE EXTRACT(YEAR FROM date) = $1
-        AND EXTRACT(MONTH FROM date) = $2
-      GROUP BY type`,
-      params
-    );
+    const { data, error } = await supabase.from('transactions').select('type,amount')
+      .filter('date', 'gte', `${year}-${m}-01`)
+      .filter('date', 'lte', `${year}-${m}-${last}`);
+    if (error) throw error;
 
     const summary = { income: 0, expense: 0, incomeCount: 0, expenseCount: 0 };
-    result.rows.forEach(row => {
-      if (row.type === 'income') {
-        summary.income = parseFloat(row.total);
-        summary.incomeCount = parseInt(row.count);
-      } else {
-        summary.expense = parseFloat(row.total);
-        summary.expenseCount = parseInt(row.count);
-      }
+    data.forEach(r => {
+      if (r.type === 'income') { summary.income += parseFloat(r.amount); summary.incomeCount++; }
+      else { summary.expense += parseFloat(r.amount); summary.expenseCount++; }
     });
     summary.balance = summary.income - summary.expense;
     res.json(summary);
@@ -68,22 +51,25 @@ router.get('/summary', async (req, res) => {
 // GET weekly summary
 router.get('/weekly', async (req, res) => {
   try {
-    const { month, year } = req.query;
-    const params = [year || new Date().getFullYear(), month || new Date().getMonth() + 1];
+    const year = req.query.year || new Date().getFullYear();
+    const month = req.query.month || new Date().getMonth() + 1;
+    const m = String(month).padStart(2, '0');
+    const last = new Date(year, month, 0).getDate();
 
-    const result = await pool.query(
-      `SELECT
-        EXTRACT(WEEK FROM date) as week,
-        type,
-        SUM(amount) as total
-      FROM transactions
-      WHERE EXTRACT(YEAR FROM date) = $1
-        AND EXTRACT(MONTH FROM date) = $2
-      GROUP BY week, type
-      ORDER BY week`,
-      params
-    );
-    res.json(result.rows);
+    const { data, error } = await supabase.from('transactions').select('type,amount,date')
+      .filter('date', 'gte', `${year}-${m}-01`)
+      .filter('date', 'lte', `${year}-${m}-${last}`);
+    if (error) throw error;
+
+    const weekMap = {};
+    data.forEach(r => {
+      const d = new Date(r.date);
+      const week = Math.ceil((d.getDate() + new Date(d.getFullYear(), d.getMonth(), 1).getDay()) / 7);
+      const key = `${week}-${r.type}`;
+      if (!weekMap[key]) weekMap[key] = { week, type: r.type, total: 0 };
+      weekMap[key].total += parseFloat(r.amount);
+    });
+    res.json(Object.values(weekMap).sort((a, b) => a.week - b.week));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -92,19 +78,23 @@ router.get('/weekly', async (req, res) => {
 // GET category breakdown
 router.get('/categories', async (req, res) => {
   try {
-    const { month, year } = req.query;
-    const params = [year || new Date().getFullYear(), month || new Date().getMonth() + 1];
+    const year = req.query.year || new Date().getFullYear();
+    const month = req.query.month || new Date().getMonth() + 1;
+    const m = String(month).padStart(2, '0');
+    const last = new Date(year, month, 0).getDate();
 
-    const result = await pool.query(
-      `SELECT category, type, SUM(amount) as total
-      FROM transactions
-      WHERE EXTRACT(YEAR FROM date) = $1
-        AND EXTRACT(MONTH FROM date) = $2
-      GROUP BY category, type
-      ORDER BY total DESC`,
-      params
-    );
-    res.json(result.rows);
+    const { data, error } = await supabase.from('transactions').select('type,amount,category')
+      .filter('date', 'gte', `${year}-${m}-01`)
+      .filter('date', 'lte', `${year}-${m}-${last}`);
+    if (error) throw error;
+
+    const catMap = {};
+    data.forEach(r => {
+      const key = `${r.category}-${r.type}`;
+      if (!catMap[key]) catMap[key] = { category: r.category, type: r.type, total: 0 };
+      catMap[key].total += parseFloat(r.amount);
+    });
+    res.json(Object.values(catMap).sort((a, b) => b.total - a.total));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -117,11 +107,11 @@ router.post('/', async (req, res) => {
     if (!type || !amount || !category || !date) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    const result = await pool.query(
-      'INSERT INTO transactions (type, amount, category, description, date) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [type, amount, category, description || null, date]
-    );
-    res.status(201).json(result.rows[0]);
+    const { data, error } = await supabase.from('transactions')
+      .insert({ type, amount: parseFloat(amount), category, description: description || null, date })
+      .select().single();
+    if (error) throw error;
+    res.status(201).json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -131,12 +121,12 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { type, amount, category, description, date } = req.body;
-    const result = await pool.query(
-      'UPDATE transactions SET type=$1, amount=$2, category=$3, description=$4, date=$5 WHERE id=$6 RETURNING *',
-      [type, amount, category, description || null, date, req.params.id]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    res.json(result.rows[0]);
+    const { data, error } = await supabase.from('transactions')
+      .update({ type, amount: parseFloat(amount), category, description: description || null, date })
+      .eq('id', req.params.id).select().single();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Not found' });
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -145,9 +135,11 @@ router.put('/:id', async (req, res) => {
 // DELETE transaction
 router.delete('/:id', async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM transactions WHERE id=$1 RETURNING id', [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    res.json({ deleted: result.rows[0].id });
+    const { data, error } = await supabase.from('transactions')
+      .delete().eq('id', req.params.id).select('id').single();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Not found' });
+    res.json({ deleted: data.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
