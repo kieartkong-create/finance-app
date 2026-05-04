@@ -1,0 +1,23 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const transactionsRouter = require('./routes/transactions');
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+const isProd = process.env.NODE_ENV === 'production';
+
+app.use(cors({ origin: isProd ? false : '*' }));
+app.use(express.json());
+
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.use('/api/transactions', transactionsRouter);
+
+if (isProd) {
+  const clientDist = path.join(__dirname, '../client/dist');
+  app.use(express.static(clientDist));
+  app.get('*', (req, res) => res.sendFile(path.join(clientDist, 'index.html')));
+}
+
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
