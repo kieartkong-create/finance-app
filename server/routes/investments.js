@@ -1,11 +1,22 @@
 const express = require('express');
 const multer = require('multer');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const supabase = require('../db/supabase');
 const router = express.Router();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const GEMINI_MODEL = 'gemini-2.5-flash';
+
+async function callGemini(prompt, imageBase64, mimeType) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: imageBase64 } }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
+  };
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const json = await res.json();
+  if (json.error) throw new Error(`Gemini: ${json.error.message}`);
+  return json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
 
 const INVEST_PROMPT = `คุณเป็น AI อ่านข้อมูลการลงทุน กรุณาอ่านรูป screenshot นี้ (เช่น แอปกองทุน, หุ้น, คริปโต)
 แล้วดึงข้อมูลการลงทุนทั้งหมดที่เห็น ตอบเป็น JSON เท่านั้น:
@@ -61,13 +72,8 @@ router.get('/summary', async (req, res) => {
 router.post('/scan', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'ไม่พบรูปภาพ' });
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    const result = await model.generateContent([
-      INVEST_PROMPT,
-      { inlineData: { data: req.file.buffer.toString('base64'), mimeType: req.file.mimetype } },
-    ]);
-    const text = result.response.text().trim();
-    const match = text.match(/\{[\s\S]*\}/);
+    const text = await callGemini(INVEST_PROMPT, req.file.buffer.toString('base64'), req.file.mimetype);
+    const match = text.trim().match(/\{[\s\S]*\}/);
     if (!match) throw new Error('ไม่สามารถอ่านข้อมูลการลงทุนได้');
     const parsed = JSON.parse(match[0]);
     const clean = n => parseFloat(String(n || 0).replace(/,/g, '')) || 0;
