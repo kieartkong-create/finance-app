@@ -12,5 +12,6 @@ RUN cd server && npm install --production
 COPY server/ ./server/
 COPY --from=builder /app/client/dist ./client/dist
 ENV NODE_ENV=production
-EXPOSE 3001
+ENV PORT=10000
+EXPOSE 10000
 CMD ["node", "server/index.js"]
